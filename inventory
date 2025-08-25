@@ -1,0 +1,10 @@
+[primary]
+prod-server ansible_host=192.168.1.100 ansible_user=oracle db_sid=PROD
+
+[standby]
+standby-server ansible_host=192.168.1.101 ansible_user=oracle db_sid=PROD
+
+[all:vars]
+ansible_connection=ssh
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+

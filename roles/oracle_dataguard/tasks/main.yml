@@ -1,0 +1,657 @@
+---
+# tasks file for /home/oracle/ansible/roles/oracle_install
+- name: Create directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: oracle
+    group: oinstall
+    mode: '0775'
+  loop:
+    - /u01/app/oracle
+    - /u01/app/oracle/product/19.3.0/dbhome_1
+    - /u01/app/oraInventory
+    - /u02/oradata
+    - /u02/backup/dataguard
+    - /u01/app/oracle/admin/{{ db_sid }}/adump
+    - /u01/app/oracle/admin/{{ db_sid }}/cdump
+  become: yes
+
+- name: Set permissions on Oracle binary
+  ansible.builtin.file:
+    path: /tmp/LINUX.X64_193000_db_home.zip
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+  become: yes
+
+- name: Extract Oracle binaries
+  ansible.builtin.unarchive:
+    src: /tmp/LINUX.X64_193000_db_home.zip
+    dest: "{{ oracle_home }}"
+    owner: oracle
+    group: oinstall
+    remote_src: yes
+  become: yes
+  become_user: oracle
+
+- name: Copy install response file
+  ansible.builtin.template:
+    src: install.rsp.j2
+    dest: /tmp/install.rsp
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+
+- name: Run Oracle installer
+  ansible.builtin.shell: |
+    export CV_ASSUME_DISTID=OEL7.8
+    {{ oracle_home }}/runInstaller -silent -force -waitforcompletion -ignorePrereqFailure -responseFile /tmp/install.rsp
+  become: yes
+  become_user: oracle
+  register: install_result
+  failed_when: "'Successfully Setup Software.' not in install_result.stdout"
+
+- name: Run orainstRoot.sh
+  ansible.builtin.shell: "{{ ora_inventory }}/orainstRoot.sh"
+  become: yes
+  when: "'orainstRoot.sh' in install_result.stdout"
+
+- name: Run root.sh
+  ansible.builtin.shell: "{{ oracle_home }}/root.sh -silent"
+  become: yes
+
+- name: Copy DBCA response file
+  ansible.builtin.template:
+    src: dbca.rsp.j2
+    dest: /tmp/dbca.rsp
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+  when: inventory_hostname in groups['primary']
+
+- name: Create database
+  ansible.builtin.shell: |
+    {{ oracle_home }}/bin/dbca -silent -createDatabase \
+    -responseFile /tmp/dbca.rsp
+  become: yes
+  become_user: oracle
+  register: dbca_result
+  failed_when: "'100% complete' not in dbca_result.stdout"
+  when: inventory_hostname in groups['primary']
+
+- name: Set database parameters
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    ALTER SYSTEM SET processes={{ init_params.processes }} SCOPE=SPFILE;
+    SHUTDOWN IMMEDIATE;
+    STARTUP;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  register: params_result
+  failed_when: params_result.rc != 0
+  when: inventory_hostname in groups['primary']
+
+- name: Enable ARCHIVELOG mode
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    SHUTDOWN IMMEDIATE;
+    STARTUP MOUNT;
+    ALTER DATABASE ARCHIVELOG;
+    ALTER DATABASE OPEN;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  register: archivelog_result
+  failed_when: archivelog_result.rc != 0
+  when: inventory_hostname in groups['primary']
+
+- name: Configure Fast Recovery Area
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    ALTER SYSTEM SET db_recovery_file_dest='/u02/oradata' SCOPE=BOTH;
+    ALTER SYSTEM SET db_recovery_file_dest_size=10G SCOPE=BOTH;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  register: fra_result
+  failed_when: fra_result.rc != 0
+  when: inventory_hostname in groups['primary']
+[oracle@ansible-server tasks]$ ll
+total 4
+-rw-rw-r--. 1 oracle oracle 3697 May 23 19:18 main.yml
+[oracle@ansible-server tasks]$ cd ..
+[oracle@ansible-server oracle_install]$ ll
+total 4
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:37 defaults
+drwxrwxr-x. 2 oracle oracle    6 May 19 23:37 files
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:37 handlers
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:37 meta
+-rw-rw-r--. 1 oracle oracle 1328 May 19 23:37 README.md
+drwxrwxr-x. 2 oracle oracle   22 May 23 19:18 tasks
+drwxrwxr-x. 2 oracle oracle   47 May 26 20:47 templates
+drwxrwxr-x. 2 oracle oracle   39 May 19 23:37 tests
+drwxrwxr-x. 2 oracle oracle   22 May 26 20:49 vars
+[oracle@ansible-server oracle_install]$ cd templates
+[oracle@ansible-server templates]$ ll
+total 8
+-rw-rw-r--. 1 oracle oracle 353 May 26 20:46 dbca.rsp.j2
+-rw-rw-r--. 1 oracle oracle 694 May 19 23:41 install.rsp.j2
+[oracle@ansible-server templates]$ cat dbca.rsp.j2
+gdbName={{ db_name }}
+sid={{ db_sid }}
+createAsContainerDatabase=false
+templateName=General_Purpose.dbc
+sysPassword={{ sys_password }}
+systemPassword={{ sys_password }}
+datafileDestination=/u02/oradata
+recoveryAreaDestination=/u02/oradata
+characterSet=AL32UTF8
+totalMemory=1536
+databaseType=MULTIPURPOSE
+automaticMemoryManagement=true
+sampleSchema=true
+[oracle@ansible-server templates]$ cat install.rsp.j2
+oracle.install.responseFileVersion=/oracle/install/rspfmt_dbinstall_response_schema_v19.0.0
+oracle.install.option=INSTALL_DB_SWONLY
+UNIX_GROUP_NAME={{ oracle_group }}
+INVENTORY_LOCATION={{ ora_inventory }}
+ORACLE_BASE={{ oracle_base }}
+ORACLE_HOME={{ oracle_home }}
+oracle.install.db.InstallEdition={{ oracle_edition }}
+oracle.install.db.OSDBA_GROUP={{ dba_group }}
+oracle.install.db.OSOPER_GROUP={{ oper_group }}
+oracle.install.db.OSBACKUPDBA_GROUP={{ backupdba_group }}
+oracle.install.db.OSDGDBA_GROUP={{ dgdba_group }}
+oracle.install.db.OSKMDBA_GROUP={{ kmdba_group }}
+oracle.install.db.OSRACDBA_GROUP={{ racdba_group }}
+oracle.install.db.isRACOneInstall=false
+DECLINE_SECURITY_UPDATES=true
+[oracle@ansible-server templates]$ ll
+total 8
+-rw-rw-r--. 1 oracle oracle 353 May 26 20:46 dbca.rsp.j2
+-rw-rw-r--. 1 oracle oracle 694 May 19 23:41 install.rsp.j2
+[oracle@ansible-server templates]$ cd ..
+[oracle@ansible-server oracle_install]$ ll
+total 4
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:37 defaults
+drwxrwxr-x. 2 oracle oracle    6 May 19 23:37 files
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:37 handlers
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:37 meta
+-rw-rw-r--. 1 oracle oracle 1328 May 19 23:37 README.md
+drwxrwxr-x. 2 oracle oracle   22 May 23 19:18 tasks
+drwxrwxr-x. 2 oracle oracle   47 May 26 20:47 templates
+drwxrwxr-x. 2 oracle oracle   39 May 19 23:37 tests
+drwxrwxr-x. 2 oracle oracle   22 May 26 20:49 vars
+[oracle@ansible-server oracle_install]$ cd vars
+[oracle@ansible-server vars]$ ll
+total 4
+-rw-rw-r--. 1 oracle oracle 406 May 26 20:49 main.yml
+[oracle@ansible-server vars]$ cat main.yml
+---
+# vars file for /home/oracle/ansible/roles/oracle_install
+oracle_user: oracle
+oracle_group: oinstall
+oracle_base: /u01/app/oracle
+oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1
+ora_inventory: /u01/app/oraInventory
+oracle_edition: EE
+dba_group: dba
+oper_group: oper
+backupdba_group: backupdba
+dgdba_group: dgdba
+kmdba_group: kmdba
+racdba_group: racdba
+init_params:
+  processes: 100
+db_name: PROD
+
+[oracle@ansible-server vars]$ cd ../..
+[oracle@ansible-server roles]$ ll
+total 8
+-rw-rw-r--.  1 oracle oracle 1793 Aug 25 16:05 environmental-setup.md
+drwxrwxr-x. 10 oracle oracle  154 May 19 23:42 oracle_dataguard
+drwxrwxr-x. 10 oracle oracle  154 May 19 23:37 oracle_install
+-rw-rw-r--.  1 oracle oracle  838 Aug 25 16:07 vm-prereqs.md
+[oracle@ansible-server roles]$ cd oracle_dataguard
+[oracle@ansible-server oracle_dataguard]$ ll
+total 4
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:42 defaults
+drwxrwxr-x. 2 oracle oracle    6 May 19 23:42 files
+drwxrwxr-x. 2 oracle oracle   22 May 25 18:49 handlers
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:42 meta
+-rw-rw-r--. 1 oracle oracle 1328 May 19 23:42 README.md
+drwxrwxr-x. 2 oracle oracle   43 May 29 15:40 tasks
+drwxrwxr-x. 2 oracle oracle   52 May 25 21:10 templates
+drwxrwxr-x. 2 oracle oracle   39 May 19 23:42 tests
+drwxrwxr-x. 2 oracle oracle   22 May 25 20:43 vars
+[oracle@ansible-server oracle_dataguard]$ cd tasks
+[oracle@ansible-server tasks]$ ll
+total 16
+-rw-rw-r--. 1 oracle oracle 15658 May 29 15:40 main.yml
+[oracle@ansible-server tasks]$ cat main.yml
+---
+# Tasks file for /home/oracle/ansible/roles/oracle_dataguard
+
+- name: Create standby directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: oracle
+    group: oinstall
+    mode: '0775'
+  become: yes
+  loop:
+    - /u02/oradata/PROD_SBY #control file location on standby pfile
+    - /u02/oradata/PROD_SBY/arch #local archive location
+    - /u02/backup/dataguard #bkp location and i assume it has been created in the oracle_install role but just double creating
+    - /u01/app/oracle/admin/PROD_SBY/adump #audit file dest needed to be recretaed for startup nomount
+    - /u01/app/oracle/admin/PROD_SBY/cdump # used for core dump files in Oracle. These files are generated when a critical error or crash
+  when: inventory_hostname in groups['standby']
+
+- name: Configure bash profile
+  ansible.builtin.copy:
+    content: |
+      export ORACLE_BASE={{ oracle_base }}
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/usr/lib
+      export NLS_LANG=AMERICAN_AMERICA.UTF8
+      export NLS_DATE_FORMAT='DD-MM-YYYY:HH24:MI:SS'
+    dest: /home/oracle/.bash_profile
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+
+- name: Source bash profile
+  ansible.builtin.shell: |
+    source /home/oracle/.bash_profile
+    echo "ORACLE_HOME=$ORACLE_HOME" >> /tmp/env_check.log
+    echo "ORACLE_SID=$ORACLE_SID" >> /tmp/env_check.log
+  become: yes
+  become_user: oracle
+  environment:
+    ORACLE_HOME: "{{ oracle_home }}"
+    ORACLE_SID: "{{ db_sid }}"
+
+- name: Copy listener.ora
+  ansible.builtin.template:
+    src: listener.ora.j2
+    dest: "{{ oracle_home }}/network/admin/listener.ora"
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+  notify: restart_listener
+
+- name: Copy tnsnames.ora
+  ansible.builtin.template:
+    src: tnsnames.ora.j2
+    dest: "{{ oracle_home }}/network/admin/tnsnames.ora"
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+
+- name: Copy password file from primary to standby
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    scp {{ oracle_home }}/dbs/orapwPROD oracle@{{ hostvars[groups['standby'][0]].ansible_host }}:{{ oracle_home }}/dbs/orapwPROD
+  delegate_to: "{{ groups['primary'][0] }}"
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['primary']
+
+- name: Create PFILE on primary
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    CREATE PFILE='/tmp/primary_pfile.ora' FROM SPFILE;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['primary']
+
+- name: Copy PFILE to standby
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    scp /tmp/primary_pfile.ora oracle@{{ hostvars[groups['standby'][0]].ansible_host }}:/tmp/standby_pfile.ora
+  delegate_to: "{{ groups['primary'][0] }}"
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['primary']
+
+- name: Modify standby PFILE
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    # Remove any existing control_files entries to avoid duplicates
+    sed -i '/CONTROL_FILES=/d' /tmp/standby_pfile.ora
+    # Set standby-specific parameters
+    sed -i 's/DB_UNIQUE_NAME=PROD/DB_UNIQUE_NAME=PROD_SBY/' /tmp/standby_pfile.ora
+    sed -i 's/AUDIT_FILE_DEST=.*/AUDIT_FILE_DEST=''\\/u01\\/app\\/oracle\\/admin\\/PROD_SBY\\/adump''/' /tmp/standby_pfile.ora
+    echo "*.db_name='PROD'" >> /tmp/standby_pfile.ora
+    echo "*.control_files='/u02/oradata/PROD_SBY/control01.ctl','/u02/oradata/PROD_SBY/control02.ctl'" >> /tmp/standby_pfile.ora
+    echo "*.db_unique_name='PROD_SBY'" >> /tmp/standby_pfile.ora
+    echo "*.log_archive_config='DG_CONFIG=(PROD,PROD_SBY)'" >> /tmp/standby_pfile.ora
+    echo "*.log_archive_dest_1='LOCATION=/u02/oradata/PROD_SBY/arch VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME=PROD_SBY'" >> /tmp/standby_pfile.ora
+    echo "*.log_archive_dest_2='SERVICE=PROD ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME=PROD'" >> /tmp/standby_pfile.ora
+    echo "*.log_archive_dest_state_1='ENABLE'" >> /tmp/standby_pfile.ora
+    echo "*.log_archive_dest_state_2='ENABLE'" >> /tmp/standby_pfile.ora
+    echo "*.log_archive_format='%t_%s_%r.arc'" >> /tmp/standby_pfile.ora
+    echo "*.log_archive_max_processes=30" >> /tmp/standby_pfile.ora
+    echo "*.fal_server='PROD'" >> /tmp/standby_pfile.ora
+    echo "*.fal_client='PROD_SBY'" >> /tmp/standby_pfile.ora
+    echo "*.db_file_name_convert='/u02/oradata/PROD/','/u02/oradata/PROD_SBY/'" >> /tmp/standby_pfile.ora
+    echo "*.log_file_name_convert='/u02/oradata/PROD/','/u02/oradata/PROD_SBY/'" >> /tmp/standby_pfile.ora
+    echo "*.standby_file_management='AUTO'" >> /tmp/standby_pfile.ora
+    echo "*.db_flashback_retention_target=1440" >> /tmp/standby_pfile.ora
+    echo "*.remote_login_passwordfile='EXCLUSIVE'" >> /tmp/standby_pfile.ora
+    mv /tmp/standby_pfile.ora {{ oracle_home }}/dbs/initPROD.ora
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+- name: Validate standby PFILE parameters
+  ansible.builtin.shell: |
+    grep -E "db_unique_name|control_files|audit_file_dest" {{ oracle_home }}/dbs/initPROD.ora
+  register: pfile_check
+  failed_when: "'PROD_SBY' not in pfile_check.stdout or '/u02/oradata/PROD_SBY/control01.ctl' not in pfile_check.stdout or '/u01/app/oracle/admin/PROD_SBY/adump' not in pfile_check.stdout"
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+- name: Create SPFILE on primary
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    CREATE SPFILE FROM PFILE='{{ oracle_home }}/dbs/initPROD.ora';
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['primary']
+
+- name: Create SPFILE on standby
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    CREATE SPFILE FROM PFILE='{{ oracle_home }}/dbs/initPROD.ora';
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+- name: Configure primary for Data Guard
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    ALTER SYSTEM SET LOG_ARCHIVE_CONFIG='DG_CONFIG=(PROD,PROD_SBY)' SCOPE=BOTH;
+    ALTER SYSTEM SET LOG_ARCHIVE_DEST_1='LOCATION=/u02/oradata/PROD/arch VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME=PROD' SCOPE=BOTH;
+    ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='SERVICE=PROD_SBY ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME=PROD_SBY' SCOPE=BOTH;
+    ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_1='ENABLE' SCOPE=BOTH;
+    ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_2='ENABLE' SCOPE=BOTH;
+    ALTER SYSTEM SET LOG_ARCHIVE_FORMAT='%t_%s_%r.arc' SCOPE=SPFILE;
+    ALTER SYSTEM SET LOG_ARCHIVE_MAX_PROCESSES=30 SCOPE=BOTH;
+    ALTER SYSTEM SET FAL_SERVER='PROD_SBY' SCOPE=BOTH;
+    ALTER SYSTEM SET FAL_CLIENT='PROD' SCOPE=BOTH;
+    ALTER SYSTEM SET DB_FILE_NAME_CONVERT='/u02/oradata/PROD_SBY/','/u02/oradata/PROD/' SCOPE=SPFILE;
+    ALTER SYSTEM SET LOG_FILE_NAME_CONVERT='/u02/oradata/PROD_SBY/','/u02/oradata/PROD/' SCOPE=SPFILE;
+    ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT='AUTO' SCOPE=BOTH;
+    ALTER SYSTEM SET DB_FLASHBACK_RETENTION_TARGET=1440 SCOPE=BOTH;
+    ALTER DATABASE FORCE LOGGING;
+    ALTER DATABASE FLASHBACK ON;
+    ALTER DATABASE ADD STANDBY LOGFILE GROUP 11 '/u02/oradata/PROD/redo11.log' SIZE 200M;
+    ALTER DATABASE ADD STANDBY LOGFILE GROUP 12 '/u02/oradata/PROD/redo12.log' SIZE 200M;
+    ALTER DATABASE ADD STANDBY LOGFILE GROUP 13 '/u02/oradata/PROD/redo13.log' SIZE 200M;
+    ALTER DATABASE ADD STANDBY LOGFILE GROUP 14 '/u02/oradata/PROD/redo14.log' SIZE 200M;
+    ALTER SYSTEM SET REMOTE_LOGIN_PASSWORDFILE='EXCLUSIVE' SCOPE=SPFILE;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['primary']
+
+- name: Start standby auxiliary instance
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    SHUTDOWN IMMEDIATE;
+    STARTUP NOMOUNT;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+- name: Start listener on standby
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    lsnrctl start
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+- name: Duplicate database for standby
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    rman target sys/{{ sys_password }}@PROD auxiliary sys/{{ sys_password }}@PROD_SBY <<EOF
+    RUN {
+      ALLOCATE CHANNEL prmy1 TYPE DISK;
+      ALLOCATE AUXILIARY CHANNEL stby1 TYPE DISK;
+      DUPLICATE TARGET DATABASE FOR STANDBY FROM ACTIVE DATABASE
+      NOFILENAMECHECK;
+    }
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+
+- name: Configure standby database parameters
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    ALTER SYSTEM SET LOG_ARCHIVE_DEST_1='LOCATION=/u02/oradata/PROD_SBY/arch VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME=PROD_SBY' SCOPE=BOTH;
+    ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='SERVICE=PROD ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME=PROD' SCOPE=BOTH; # deactivate for dgb
+    ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_1='ENABLE' SCOPE=BOTH;
+    ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_2='ENABLE' SCOPE=BOTH;
+    ALTER SYSTEM SET LOG_ARCHIVE_FORMAT='%t_%s_%r.arc' SCOPE=SPFILE;
+    ALTER SYSTEM SET LOG_ARCHIVE_MAX_PROCESSES=30 SCOPE=BOTH;
+    ALTER SYSTEM SET FAL_SERVER='PROD' SCOPE=BOTH;
+    ALTER SYSTEM SET FAL_CLIENT='PROD_SBY' SCOPE=BOTH;
+    ALTER SYSTEM SET DB_FILE_NAME_CONVERT='/u02/oradata/PROD/','/u02/oradata/PROD_SBY/' SCOPE=SPFILE;
+    ALTER SYSTEM SET LOG_FILE_NAME_CONVERT='/u02/oradata/PROD/','/u02/oradata/PROD_SBY/' SCOPE=SPFILE;
+    ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT='AUTO' SCOPE=BOTH;
+    ALTER SYSTEM SET DB_FLASHBACK_RETENTION_TARGET=1440 SCOPE=BOTH;
+    ALTER SYSTEM SET REMOTE_LOGIN_PASSWORDFILE='EXCLUSIVE' SCOPE=SPFILE;
+    BEGIN
+      EXECUTE IMMEDIATE 'ALTER DATABASE FLASHBACK ON';
+    EXCEPTION
+      WHEN OTHERS THEN
+        IF SQLCODE = -38706 THEN NULL; -- Ignore ORA-38706 (recovery needed)
+        ELSE RAISE;
+      END IF;
+    END;
+    /
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+- name: Add standby redo logs on standby
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    BEGIN
+      FOR i IN 11..14 LOOP
+        EXECUTE IMMEDIATE 'ALTER DATABASE ADD STANDBY LOGFILE GROUP ' || i || ' ''/u02/oradata/PROD_SBY/redo' || i || '.log'' SIZE 200M'
+        EXCEPTION WHEN OTHERS THEN
+          IF SQLCODE = -1184 THEN NULL; -- Ignore ORA-01184 (group exists)
+          ELSE RAISE;
+          END IF;
+      END LOOP;
+    END;
+    /
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+  #- name: Add standby redo logs on standby
+  # ansible.builtin.shell: |
+  # export ORACLE_HOME={{ oracle_home }}
+  # export PATH=$ORACLE_HOME/bin:$PATH
+  # export ORACLE_SID={{ db_sid }}
+  # sqlplus / as sysdba <<EOF
+  # ALTER DATABASE ADD STANDBY LOGFILE GROUP 11 '/u02/oradata/PROD_SBY/redo11.log' SIZE 200M;
+  # ALTER DATABASE ADD STANDBY LOGFILE GROUP 12 '/u02/oradata/PROD_SBY/redo12.log' SIZE 200M;
+  # ALTER DATABASE ADD STANDBY LOGFILE GROUP 13 '/u02/oradata/PROD_SBY/redo13.log' SIZE 200M;
+  # ALTER DATABASE ADD STANDBY LOGFILE GROUP 14 '/u02/oradata/PROD_SBY/redo14.log' SIZE 200M;
+  # EXIT;
+  # EOF
+  #become: yes
+  #become_user: oracle
+  #when: inventory_hostname in groups['standby']
+
+- name: Mount standby database
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    SHUTDOWN IMMEDIATE;
+    STARTUP MOUNT;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+- name: Start redo apply on standby
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+- name: Verify log apply on standby
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    SET HEADING OFF
+    ALTER DATABASE OPEN READ ONLY;
+    SELECT 'APPLIED=' || COUNT(*) FROM V$ARCHIVED_LOG WHERE APPLIED='YES';
+    EXIT;
+    EOF
+  register: log_apply
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+- name: Debug log apply status
+  ansible.builtin.debug:
+    msg: "Standby log apply status: {{ log_apply.stdout }}"
+  when: inventory_hostname in groups['standby']
+
+- name: Test data replication
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    CREATE TABLE TEST1 (C1 INT PRIMARY KEY, C2 CHAR(6));
+    INSERT INTO TEST1 VALUES (52, 'rap');
+    INSERT INTO TEST1 VALUES (56, 'cap');
+    COMMIT;
+    ALTER SYSTEM CHECKPOINT;
+    ALTER SYSTEM SWITCH LOGFILE;
+    ALTER SYSTEM ARCHIVE LOG CURRENT;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['primary']
+
+- name: Verify test data on standby
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    SET HEADING OFF
+    ALTER DATABASE OPEN READ ONLY;
+    SELECT COUNT(*) FROM TEST1 WHERE C1 IN (52, 56);
+    EXIT;
+    EOF
+  register: test_data
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+- name: Debug test data verification
+  ansible.builtin.debug:
+    msg: "Test data count on standby: {{ test_data.stdout }}"
+  when: inventory_hostname in groups['standby']
+
+- name: Revert standby to MOUNT and restart MRP
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    sqlplus / as sysdba <<EOF
+    SHUTDOWN IMMEDIATE;
+    STARTUP MOUNT;
+    ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  when: inventory_hostname in groups['standby']
+
+

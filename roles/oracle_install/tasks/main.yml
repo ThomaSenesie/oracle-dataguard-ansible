@@ -1,0 +1,246 @@
+# /home/oracle/ansible/oracle_dg_setup.yml
+---
+- name: Install Oracle 19c Software on PROD AND PROD_SBY and create PROD database
+  hosts: primary
+  vars_files:
+    - secrets.yml
+  vars:
+    db_name: PROD
+    db_sid: PROD
+  roles:
+    - oracle_install
+
+- name: Configure Oracle 19c Data Guard
+  hosts: all
+  vars_files:
+    - secrets.yml
+  vars:
+    db_name: PROD
+    db_sid: PROD
+  roles:
+    - oracle_dataguard
+[oracle@ansible-server ansible]$ cat dataguard_broker.yml
+# /home/oracle/ansible/dataguard_broker.yml
+---
+- name: Configure Oracle 19c Data Guard Broker
+  hosts: primary
+  vars_files:
+    - secrets.yml
+  vars:
+    db_name: PROD
+    db_sid: PROD
+    oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1
+  tasks:
+    - name: Enable Data Guard Broker on primary
+      ansible.builtin.shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        export ORACLE_SID={{ db_sid }}
+        sqlplus / as sysdba <<EOF
+        ALTER SYSTEM SET DG_BROKER_START=TRUE SCOPE=BOTH;
+        EXIT;
+        EOF
+      become: true
+      become_user: oracle
+
+    - name: Enable Data Guard Broker on standby
+      ansible.builtin.shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        export ORACLE_SID={{ db_sid }}
+        sqlplus / as sysdba <<EOF
+        ALTER SYSTEM SET DG_BROKER_START=TRUE SCOPE=BOTH;
+        EXIT;
+        EOF
+      become: true
+      become_user: oracle
+      delegate_to: "{{ groups['standby'][0] }}"
+
+    - name: Configure Data Guard Broker
+      ansible.builtin.shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        export ORACLE_SID={{ db_sid }}
+        dgmgrl sys/{{ sys_password }}@PROD <<EOF
+        CREATE CONFIGURATION my_dg_config AS PRIMARY DATABASE IS PROD CONNECT IDENTIFIER IS PROD;
+        REMOVE DATABASE PROD_SBY;
+        ADD DATABASE PROD_SBY AS CONNECT IDENTIFIER IS PROD_SBY;
+        ENABLE CONFIGURATION;
+        EDIT DATABASE 'PROD' SET PROPERTY StaticConnectIdentifier='(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={{ hostvars[groups['primary'][0]].ansible_host }})(PORT=1521))(CONNECT_DATA=(SID=PROD)))';
+        EDIT DATABASE 'PROD_SBY' SET PROPERTY StaticConnectIdentifier='(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={{ hostvars[groups['standby'][0]].ansible_host }})(PORT=1521))(CONNECT_DATA=(SID=PROD)))';
+        EXIT;
+        EOF
+      become: true
+      become_user: oracle
+      ignore_errors: true  # Ignore ORA-16504 if config exists
+
+    - name: Verify Data Guard Broker configuration
+      ansible.builtin.shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        export ORACLE_SID={{ db_sid }}
+        dgmgrl sys/{{ sys_password }}@PROD <<EOF
+        SHOW CONFIGURATION;
+        EXIT;
+        EOF
+      register: broker_status
+      failed_when: "'prod_sby - Physical standby database' not in broker_status.stdout"
+      become: true
+      become_user: oracle
+[oracle@ansible-server ansible]$ cd roles
+[oracle@ansible-server roles]$ ll
+total 8
+-rw-rw-r--.  1 oracle oracle 1793 Aug 25 16:05 environmental-setup.md
+drwxrwxr-x. 10 oracle oracle  154 May 19 23:42 oracle_dataguard
+drwxrwxr-x. 10 oracle oracle  154 May 19 23:37 oracle_install
+-rw-rw-r--.  1 oracle oracle  838 Aug 25 16:07 vm-prereqs.md
+[oracle@ansible-server roles]$ cd oracle_install
+[oracle@ansible-server oracle_install]$ ll
+total 4
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:37 defaults
+drwxrwxr-x. 2 oracle oracle    6 May 19 23:37 files
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:37 handlers
+drwxrwxr-x. 2 oracle oracle   22 May 19 23:37 meta
+-rw-rw-r--. 1 oracle oracle 1328 May 19 23:37 README.md
+drwxrwxr-x. 2 oracle oracle   22 May 23 19:18 tasks
+drwxrwxr-x. 2 oracle oracle   47 May 26 20:47 templates
+drwxrwxr-x. 2 oracle oracle   39 May 19 23:37 tests
+drwxrwxr-x. 2 oracle oracle   22 May 26 20:49 vars
+[oracle@ansible-server oracle_install]$ cd tasks
+[oracle@ansible-server tasks]$ ll
+total 4
+-rw-rw-r--. 1 oracle oracle 3697 May 23 19:18 main.yml
+[oracle@ansible-server tasks]$ cat main.yml
+---
+# tasks file for /home/oracle/ansible/roles/oracle_install
+- name: Create directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: oracle
+    group: oinstall
+    mode: '0775'
+  loop:
+    - /u01/app/oracle
+    - /u01/app/oracle/product/19.3.0/dbhome_1
+    - /u01/app/oraInventory
+    - /u02/oradata
+    - /u02/backup/dataguard
+    - /u01/app/oracle/admin/{{ db_sid }}/adump
+    - /u01/app/oracle/admin/{{ db_sid }}/cdump
+  become: yes
+
+- name: Set permissions on Oracle binary
+  ansible.builtin.file:
+    path: /tmp/LINUX.X64_193000_db_home.zip
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+  become: yes
+
+- name: Extract Oracle binaries
+  ansible.builtin.unarchive:
+    src: /tmp/LINUX.X64_193000_db_home.zip
+    dest: "{{ oracle_home }}"
+    owner: oracle
+    group: oinstall
+    remote_src: yes
+  become: yes
+  become_user: oracle
+
+- name: Copy install response file
+  ansible.builtin.template:
+    src: install.rsp.j2
+    dest: /tmp/install.rsp
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+
+- name: Run Oracle installer
+  ansible.builtin.shell: |
+    export CV_ASSUME_DISTID=OEL7.8
+    {{ oracle_home }}/runInstaller -silent -force -waitforcompletion -ignorePrereqFailure -responseFile /tmp/install.rsp
+  become: yes
+  become_user: oracle
+  register: install_result
+  failed_when: "'Successfully Setup Software.' not in install_result.stdout"
+
+- name: Run orainstRoot.sh
+  ansible.builtin.shell: "{{ ora_inventory }}/orainstRoot.sh"
+  become: yes
+  when: "'orainstRoot.sh' in install_result.stdout"
+
+- name: Run root.sh
+  ansible.builtin.shell: "{{ oracle_home }}/root.sh -silent"
+  become: yes
+
+- name: Copy DBCA response file
+  ansible.builtin.template:
+    src: dbca.rsp.j2
+    dest: /tmp/dbca.rsp
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+  when: inventory_hostname in groups['primary']
+
+- name: Create database
+  ansible.builtin.shell: |
+    {{ oracle_home }}/bin/dbca -silent -createDatabase \
+    -responseFile /tmp/dbca.rsp
+  become: yes
+  become_user: oracle
+  register: dbca_result
+  failed_when: "'100% complete' not in dbca_result.stdout"
+  when: inventory_hostname in groups['primary']
+
+- name: Set database parameters
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    ALTER SYSTEM SET processes={{ init_params.processes }} SCOPE=SPFILE;
+    SHUTDOWN IMMEDIATE;
+    STARTUP;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  register: params_result
+  failed_when: params_result.rc != 0
+  when: inventory_hostname in groups['primary']
+
+- name: Enable ARCHIVELOG mode
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    SHUTDOWN IMMEDIATE;
+    STARTUP MOUNT;
+    ALTER DATABASE ARCHIVELOG;
+    ALTER DATABASE OPEN;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  register: archivelog_result
+  failed_when: archivelog_result.rc != 0
+  when: inventory_hostname in groups['primary']
+
+- name: Configure Fast Recovery Area
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    ALTER SYSTEM SET db_recovery_file_dest='/u02/oradata' SCOPE=BOTH;
+    ALTER SYSTEM SET db_recovery_file_dest_size=10G SCOPE=BOTH;
+    EXIT;
+    EOF
+  become: yes
+  become_user: oracle
+  register: fra_result
+  failed_when: fra_result.rc != 0
+  when: inventory_hostname in groups['primary']
+

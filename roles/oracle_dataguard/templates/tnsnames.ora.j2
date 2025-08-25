@@ -1,0 +1,18 @@
+PROD =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = {{ hostvars[groups['primary'][0]].ansible_host }})(PORT = 1521))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SID = PROD)
+    )
+  )
+
+PROD_SBY =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = {{ hostvars[groups['standby'][0]].ansible_host }})(PORT = 1521))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SID = PROD)
+    )
+  )
+

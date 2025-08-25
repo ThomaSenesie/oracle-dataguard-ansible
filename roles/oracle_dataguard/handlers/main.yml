@@ -1,0 +1,12 @@
+
+---
+# handlers file for /home/oracle/ansible/roles/oracle_dataguard
+- name: restart_listener
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    lsnrctl stop
+    lsnrctl start
+  become: yes
+  become_user: oracle
+

@@ -1,0 +1,21 @@
+---
+- name: Install Oracle 19c Software on PROD AND PROD_SBY and create PROD database
+  hosts: primary
+  vars_files:
+    - secrets.yml
+  vars:
+    db_name: PROD
+    db_sid: PROD
+  roles:
+    - oracle_install
+
+- name: Configure Oracle 19c Data Guard
+  hosts: all
+  vars_files:
+    - secrets.yml
+  vars:
+    db_name: PROD
+    db_sid: PROD
+  roles:
+    - oracle_dataguard
+

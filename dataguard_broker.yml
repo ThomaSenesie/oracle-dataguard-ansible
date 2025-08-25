@@ -1,0 +1,70 @@
+# /home/oracle/ansible/dataguard_broker.yml
+---
+- name: Configure Oracle 19c Data Guard Broker
+  hosts: primary
+  vars_files:
+    - secrets.yml
+  vars:
+    db_name: PROD
+    db_sid: PROD
+    oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1
+  tasks:
+    - name: Enable Data Guard Broker on primary
+      ansible.builtin.shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        export ORACLE_SID={{ db_sid }}
+        sqlplus / as sysdba <<EOF
+        ALTER SYSTEM SET DG_BROKER_START=TRUE SCOPE=BOTH;
+        EXIT;
+        EOF
+      become: true
+      become_user: oracle
+
+    - name: Enable Data Guard Broker on standby
+      ansible.builtin.shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        export ORACLE_SID={{ db_sid }}
+        sqlplus / as sysdba <<EOF
+        ALTER SYSTEM SET DG_BROKER_START=TRUE SCOPE=BOTH;
+        EXIT;
+        EOF
+      become: true
+      become_user: oracle
+      delegate_to: "{{ groups['standby'][0] }}"
+
+    - name: Configure Data Guard Broker
+      ansible.builtin.shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        export ORACLE_SID={{ db_sid }}
+        dgmgrl sys/{{ sys_password }}@PROD <<EOF
+        CREATE CONFIGURATION my_dg_config AS PRIMARY DATABASE IS PROD CONNECT IDENTIFIER IS PROD;
+        REMOVE DATABASE PROD_SBY;
+        ADD DATABASE PROD_SBY AS CONNECT IDENTIFIER IS PROD_SBY;
+        ENABLE CONFIGURATION;
+        EDIT DATABASE 'PROD' SET PROPERTY StaticConnectIdentifier='(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={{ hostvars[groups['primary'][0]].ansible_host }})(PORT=1521))(CONNECT_DATA=(SID=PROD)))';
+        EDIT DATABASE 'PROD_SBY' SET PROPERTY StaticConnectIdentifier='(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={{ hostvars[groups['standby'][0]].ansible_host }})(PORT=1521))(CONNECT_DATA=(SID=PROD)))';
+        EXIT;
+        EOF
+      become: true
+      become_user: oracle
+      ignore_errors: true  # Ignore ORA-16504 if config exists
+
+    - name: Verify Data Guard Broker configuration
+      ansible.builtin.shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        export ORACLE_SID={{ db_sid }}
+        dgmgrl sys/{{ sys_password }}@PROD <<EOF
+        SHOW CONFIGURATION;
+        EXIT;
+        EOF
+      register: broker_status
+      failed_when: "'prod_sby - Physical standby database' not in broker_status.stdout"
+      become: true
+      become_user: oracle
+
+
+
